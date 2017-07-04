@@ -8,7 +8,7 @@ ColorHandPose3D is a Convolutional Neural Network estimating 3D Hand Pose from a
 ## Usage
 The network ships with a minimal example, that performs a forward pass and shows the predictions.
 
-- Download [data](https://lmb.informatik.uni-freiburg.de/projects/hand3d/ColorHandPose3D_data.zip) and unzip it into the projects root folder (This will create 3 folders: "data", "results" and "weights")
+- Download [data](https://lmb.informatik.uni-freiburg.de/projects/hand3d/ColorHandPose3D_data_v2.zip) and unzip it into the projects root folder (This will create 3 folders: "data", "results" and "weights")
 - *run.py* - Will run a forward pass of the network on the provided examples
 
 You can compare your results to the content of the folder "results", which shows the predictions we get on our system.
@@ -28,7 +28,7 @@ Python packages used by the example provided and their recommended version:
 - matplotlib==1.5.3
 
 ## License and Citation
-This project is licensed under the terms of the GPL v2 license. By using the software, you are agreeing to the terms of the [license agreement](https://github.com/lmb-freiburg/hand3d/LICENSE).
+This project is licensed under the terms of the GPL v2 license. By using the software, you are agreeing to the terms of the [license agreement](https://github.com/lmb-freiburg/hand3d/blob/master/LICENSE).
 
 
 Please cite us in your publications if it helps your research:

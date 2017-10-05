@@ -114,7 +114,7 @@ class ColorHandPose3DNetwork(object):
             layers_per_recurrent_unit = 5
             num_recurrent_units = 2
             for pass_id in range(num_recurrent_units):
-                x = tf.concat(3, [scoremap_list[-1], encoding])
+                x = tf.concat([scoremap_list[-1], encoding], 3)
                 for rec_id in range(layers_per_recurrent_unit):
                     x = ops.conv_relu(x, 'conv%d_%d' % (pass_id+6, rec_id+1), kernel_size=7, stride=1, out_chan=128, trainable=train)
                 x = ops.conv_relu(x, 'conv%d_6' % (pass_id+6), kernel_size=1, stride=1, out_chan=128, trainable=train)
@@ -139,7 +139,7 @@ class ColorHandPose3DNetwork(object):
         coord_xyz_can_flip = self._flip_right_hand(coord_can, cond_right_all)
 
         # rotate view back
-        coord_xyz_rel_normed = tf.batch_matmul(coord_xyz_can_flip, rot_mat)
+        coord_xyz_rel_normed = tf.matmul(coord_xyz_can_flip, rot_mat)
 
         return coord_xyz_rel_normed
 
@@ -157,7 +157,7 @@ class ColorHandPose3DNetwork(object):
             # Estimate relative 3D coordinates
             out_chan_list = [512, 512]
             x = tf.reshape(x, [s[0], -1])
-            x = tf.concat(1, [x, hand_side])
+            x = tf.concat([x, hand_side], 1)
             for i, out_chan in enumerate(out_chan_list):
                 x = ops.fully_connected_relu(x, 'fc_rel%d' % i, out_chan=out_chan, trainable=train)
                 x = ops.dropout(x, 0.8, evaluation)
@@ -183,7 +183,7 @@ class ColorHandPose3DNetwork(object):
     def _rotation_estimation(scoremap2d, hand_side, evaluation, train=False):
         """ Estimates the rotation from canonical coords to realworld xyz. """
         # conv down scoremap to some reasonable length
-        x = tf.concat(3, [scoremap2d])
+        x = tf.concat([scoremap2d], 3)
         s = x.get_shape().as_list()
         out_chan_list = [64, 128, 256]
         for i, out_chan in enumerate(out_chan_list):
@@ -192,7 +192,7 @@ class ColorHandPose3DNetwork(object):
 
         # flatten
         x = tf.reshape(x, [s[0], -1])  # this is Bx2048
-        x = tf.concat(1, [x, hand_side])
+        x = tf.concat([x, hand_side], 1)
 
         # Estimate Viewpoint --> 3 params
         out_chan_list = [256, 128]
@@ -247,10 +247,10 @@ class ColorHandPose3DNetwork(object):
                 expanded = True
 
             # mirror along y axis
-            coords_xyz_canonical_mirrored = tf.pack([coords_xyz_canonical[:, :, 0], coords_xyz_canonical[:, :, 1], -coords_xyz_canonical[:, :, 2]], -1)
+            coords_xyz_canonical_mirrored = tf.stack([coords_xyz_canonical[:, :, 0], coords_xyz_canonical[:, :, 1], -coords_xyz_canonical[:, :, 2]], -1)
 
             # select mirrored in case it was a right hand
-            coords_xyz_canonical_left = tf.select(cond_right, coords_xyz_canonical_mirrored, coords_xyz_canonical)
+            coords_xyz_canonical_left = tf.where(cond_right, coords_xyz_canonical_mirrored, coords_xyz_canonical)
 
             if expanded:
                 coords_xyz_canonical_left = tf.squeeze(coords_xyz_canonical_left, [0])

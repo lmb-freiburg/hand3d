@@ -189,9 +189,9 @@ def crop_image_from_xy(image, crop_location, crop_size, scale=1.0):
         y2 /= s[1]
         x1 /= s[2]
         x2 /= s[2]
-        boxes = tf.pack([y1, x1, y2, x2], -1)
+        boxes = tf.stack([y1, x1, y2, x2], -1)
 
-        crop_size = tf.cast(tf.pack([crop_size, crop_size]), tf.int32)
+        crop_size = tf.cast(tf.stack([crop_size, crop_size]), tf.int32)
         box_ind = tf.range(s[0])
         image_c = tf.image.crop_and_resize(tf.cast(image, tf.float32), boxes, box_ind, crop_size, name='crop')
         return image_c
@@ -225,9 +225,9 @@ def find_max_location(scoremap):
         for i in range(s[0]):
             x_loc = tf.reshape(x_vec[max_ind_vec[i]], [1])
             y_loc = tf.reshape(y_vec[max_ind_vec[i]], [1])
-            xy_loc.append(tf.concat(0, [x_loc, y_loc]))
+            xy_loc.append(tf.concat([x_loc, y_loc], 0))
 
-        xy_loc = tf.pack(xy_loc, 0)
+        xy_loc = tf.stack(xy_loc, 0)
         return xy_loc
 
 
@@ -259,12 +259,12 @@ def single_obj_scoremap(scoremap):
                 objectmap = tf.reshape(objectmap, [1, s[1], s[2], 1])
                 objectmap_dil = tf.nn.dilation2d(objectmap, kernel_dil, [1, 1, 1, 1], [1, 1, 1, 1], 'SAME')
                 objectmap_dil = tf.reshape(objectmap_dil, [s[1], s[2]])
-                objectmap = tf.round(tf.mul(detmap_fg[i, :, :], objectmap_dil))
+                objectmap = tf.round(tf.multiply(detmap_fg[i, :, :], objectmap_dil))
 
             objectmap = tf.reshape(objectmap, [s[1], s[2], 1])
             objectmap_list.append(objectmap)
 
-        objectmap = tf.pack(objectmap_list)
+        objectmap = tf.stack(objectmap_list)
 
         return objectmap
 
@@ -300,14 +300,14 @@ def calc_center_bb(binary_class_mask):
             y_min = tf.reduce_min(Y_masked)
             y_max = tf.reduce_max(Y_masked)
 
-            start = tf.pack([x_min, y_min])
-            end = tf.pack([x_max, y_max])
-            bb = tf.pack([start, end], 1)
+            start = tf.stack([x_min, y_min])
+            end = tf.stack([x_max, y_max])
+            bb = tf.stack([start, end], 1)
             bb_list.append(bb)
 
             center_x = 0.5*(x_max + x_min)
             center_y = 0.5*(y_max + y_min)
-            center = tf.pack([center_x, center_y], 0)
+            center = tf.stack([center_x, center_y], 0)
 
             center = tf.cond(tf.reduce_all(tf.is_finite(center)), lambda: center,
                                   lambda: tf.constant([160.0, 160.0]))
@@ -322,9 +322,9 @@ def calc_center_bb(binary_class_mask):
             crop_size.set_shape([1])
             crop_size_list.append(crop_size)
 
-        bb = tf.pack(bb_list)
-        center = tf.pack(center_list)
-        crop_size = tf.pack(crop_size_list)
+        bb = tf.stack(bb_list)
+        center = tf.stack(center_list)
+        crop_size = tf.stack(crop_size_list)
 
         return center, bb, crop_size
 

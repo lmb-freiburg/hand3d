@@ -18,6 +18,7 @@
 from __future__ import print_function, unicode_literals
 
 import tensorflow as tf
+from tensorflow.python import pywrap_tensorflow
 import numpy as np
 import math
 
@@ -35,7 +36,6 @@ class NetworkOps(object):
     def conv(cls, in_tensor, layer_name, kernel_size, stride, out_chan, trainable=True):
         with tf.variable_scope(layer_name):
             in_size = in_tensor.get_shape().as_list()
-            tf.add_to_collection('shapes_for_memory', in_tensor)
 
             strides = [1, stride, stride, 1]
             kernel_shape = [kernel_size, kernel_size, in_size[3], out_chan]
@@ -68,7 +68,6 @@ class NetworkOps(object):
     def upconv(cls, in_tensor, layer_name, output_shape, kernel_size, stride, trainable=True):
         with tf.variable_scope(layer_name):
             in_size = in_tensor.get_shape().as_list()
-            tf.add_to_collection('shapes_for_memory', in_tensor)
 
             kernel_shape = [kernel_size, kernel_size, in_size[3], in_size[3]]
             strides = [1, stride, stride, 1]
@@ -476,3 +475,201 @@ def plot_hand_3d(coords_xyz, axis, color_fixed=None, linewidth='1'):
             axis.plot(coords[:, 0], coords[:, 1], coords[:, 2], color_fixed, linewidth=linewidth)
 
     axis.view_init(azim=-90., elev=90.)
+
+
+class LearningRateScheduler:
+    """
+        Provides scalar tensors at certain iteration as is needed for a multistep learning rate schedule.
+    """
+    def __init__(self, steps, values):
+        self.steps = steps
+        self.values = values
+
+        assert len(steps)+1 == len(values), "There must be one more element in value as step."
+
+    def get_lr(self, global_step):
+        with tf.name_scope('lr_scheduler'):
+
+            if len(self.values) == 1: #1 value -> no step
+                learning_rate = tf.constant(self.values[0])
+            elif len(self.values) == 2: #2 values -> one step
+                cond = tf.greater(global_step, self.steps[0])
+                learning_rate = tf.where(cond, self.values[1], self.values[0])
+            else: # n values -> n-1 steps
+                cond_first = tf.less(global_step, self.steps[0])
+
+                cond_between = list()
+                for ind, step in enumerate(range(0, len(self.steps)-1)):
+                    cond_between.append(tf.logical_and(tf.less(global_step, self.steps[ind+1]),
+                                                       tf.greater_equal(global_step, self.steps[ind])))
+
+                cond_last = tf.greater_equal(global_step, self.steps[-1])
+
+                cond_full = [cond_first]
+                cond_full.extend(cond_between)
+                cond_full.append(cond_last)
+
+                cond_vec = tf.stack(cond_full)
+                lr_vec = tf.stack(self.values)
+
+                learning_rate = tf.where(cond_vec, lr_vec, tf.zeros_like(lr_vec))
+
+                learning_rate = tf.reduce_sum(learning_rate)
+
+            return learning_rate
+
+
+class EvalUtil:
+    """ Util class for evaluation networks.
+    """
+    def __init__(self, num_kp=21):
+        # init empty data storage
+        self.data = list()
+        self.num_kp = num_kp
+        for _ in range(num_kp):
+            self.data.append(list())
+
+    def feed(self, keypoint_gt, keypoint_vis, keypoint_pred):
+        """ Used to feed data to the class. Stores the euclidean distance between gt and pred, when it is visible. """
+        keypoint_gt = np.squeeze(keypoint_gt)
+        keypoint_pred = np.squeeze(keypoint_pred)
+        keypoint_vis = np.squeeze(keypoint_vis).astype('bool')
+
+        assert len(keypoint_gt.shape) == 2
+        assert len(keypoint_pred.shape) == 2
+        assert len(keypoint_vis.shape) == 1
+
+        # calc euclidean distance
+        diff = keypoint_gt - keypoint_pred
+        euclidean_dist = np.sqrt(np.sum(np.square(diff), axis=1))
+
+        num_kp = keypoint_gt.shape[0]
+        for i in range(num_kp):
+            if keypoint_vis[i]:
+                self.data[i].append(euclidean_dist[i])
+
+    def _get_pck(self, kp_id, threshold):
+        """ Returns pck for one keypoint for the given threshold. """
+        if len(self.data[kp_id]) == 0:
+            return None
+
+        data = np.array(self.data[kp_id])
+        pck = np.mean((data <= threshold).astype('float'))
+        return pck
+
+    def _get_epe(self, kp_id):
+        """ Returns end point error for one keypoint. """
+        if len(self.data[kp_id]) == 0:
+            return None, None
+
+        data = np.array(self.data[kp_id])
+        epe_mean = np.mean(data)
+        epe_median = np.median(data)
+        return epe_mean, epe_median
+
+    def get_measures(self, val_min, val_max, steps):
+        """ Outputs the average mean and median error as well as the pck score. """
+        thresholds = np.linspace(val_min, val_max, steps)
+        thresholds = np.array(thresholds)
+        norm_factor = np.trapz(np.ones_like(thresholds), thresholds)
+
+        # init mean measures
+        epe_mean_all = list()
+        epe_median_all = list()
+        auc_all = list()
+        pck_curve_all = list()
+
+        # Create one plot for each part
+        for part_id in range(self.num_kp):
+            # mean/median error
+            mean, median = self._get_epe(part_id)
+
+            if mean is None:
+                # there was no valid measurement for this keypoint
+                continue
+
+            epe_mean_all.append(mean)
+            epe_median_all.append(median)
+
+            # pck/auc
+            pck_curve = list()
+            for t in thresholds:
+                pck = self._get_pck(part_id, t)
+                pck_curve.append(pck)
+
+            pck_curve = np.array(pck_curve)
+            pck_curve_all.append(pck_curve)
+            auc = np.trapz(pck_curve, thresholds)
+            auc /= norm_factor
+            auc_all.append(auc)
+
+        epe_mean_all = np.mean(np.array(epe_mean_all))
+        epe_median_all = np.mean(np.array(epe_median_all))
+        auc_all = np.mean(np.array(auc_all))
+        pck_curve_all = np.mean(np.array(pck_curve_all), 0)  # mean only over keypoints
+
+        return epe_mean_all, epe_median_all, auc_all, pck_curve_all, thresholds
+
+
+def load_weights_from_snapshot(session, checkpoint_path, discard_list=None, rename_dict=None):
+        """ Loads weights from a snapshot except the ones indicated with discard_list. Others are possibly renamed. """
+        reader = pywrap_tensorflow.NewCheckpointReader(checkpoint_path)
+        var_to_shape_map = reader.get_variable_to_shape_map()
+
+        # Remove everything from the discard list
+        if discard_list is not None:
+            num_disc = 0
+            var_to_shape_map_new = dict()
+            for k, v in var_to_shape_map.items():
+                good = True
+                for dis_str in discard_list:
+                    if dis_str in k:
+                        good = False
+
+                if good:
+                    var_to_shape_map_new[k] = v
+                else:
+                    num_disc += 1
+            var_to_shape_map = dict(var_to_shape_map_new)
+            print('Discarded %d items' % num_disc)
+
+        # rename everything according to rename_dict
+        num_rename = 0
+        var_to_shape_map_new = dict()
+        for name in var_to_shape_map.keys():
+            new_name = name
+            if rename_dict is not None:
+                for rename_str in rename_dict.keys():
+                    if rename_str in name:
+                        new_name = new_name.replace(rename_str, rename_dict[rename_str])
+                        num_rename += 1
+            var_to_shape_map_new[new_name] = reader.get_tensor(name)
+        var_to_shape_map = dict(var_to_shape_map_new)
+
+        init_op, init_feed = tf.contrib.framework.assign_from_values(var_to_shape_map)
+        session.run(init_op, init_feed)
+        print('Initialized %d variables from %s.' % (len(var_to_shape_map), checkpoint_path))
+
+
+def calc_auc(x, y):
+    """ Given x and y values it calculates the approx. integral and normalizes it: area under curve"""
+    integral = np.trapz(y, x)
+    norm = np.trapz(np.ones_like(y), x)
+
+    return integral / norm
+
+
+def get_stb_ref_curves():
+    """
+        Returns results of various baseline methods on the Stereo Tracking Benchmark Dataset reported by:
+        Zhang et al., ‘3d Hand Pose Tracking and Estimation Using Stereo Matching’, 2016
+    """
+    curve_list = list()
+    thresh_mm = np.array([20.0, 25, 30, 35, 40, 45, 50])
+    pso_b1 = np.array([0.32236842,  0.53947368,  0.67434211,  0.75657895,  0.80921053, 0.86513158,  0.89473684])
+    curve_list.append((thresh_mm, pso_b1, 'PSO (AUC=%.3f)' % calc_auc(thresh_mm, pso_b1)))
+    icppso_b1 = np.array([ 0.51973684,  0.64473684,  0.71710526,  0.77302632,  0.80921053, 0.84868421,  0.86842105])
+    curve_list.append((thresh_mm, icppso_b1, 'ICPPSO (AUC=%.3f)' % calc_auc(thresh_mm, icppso_b1)))
+    chpr_b1 = np.array([ 0.56578947,  0.71710526,  0.82236842,  0.88157895,  0.91447368, 0.9375,  0.96052632])
+    curve_list.append((thresh_mm, chpr_b1, 'CHPR (AUC=%.3f)' % calc_auc(thresh_mm, chpr_b1)))
+    return curve_list

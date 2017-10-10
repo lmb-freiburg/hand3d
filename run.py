@@ -22,10 +22,9 @@ import numpy as np
 import scipy.misc
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
-import pickle
 
-from net import ColorHandPose3DNetwork
-from utils import detect_keypoints, trafo_coords, plot_hand, plot_hand_3d
+from nets.ColorHandPose3DNetwork import ColorHandPose3DNetwork
+from utils.general import detect_keypoints, trafo_coords, plot_hand, plot_hand_3d
 
 if __name__ == '__main__':
     # images to be shown
@@ -49,19 +48,9 @@ if __name__ == '__main__':
     # Start TF
     gpu_options = tf.GPUOptions(per_process_gpu_memory_fraction=0.8)
     sess = tf.Session(config=tf.ConfigProto(gpu_options=gpu_options))
-    # init = tf.initialize_all_variables()
-    # sess.run(init)
 
-    # Initialize with weights
-    with open('./weights/weights_HandSegNet.pickle', 'rb') as fi:
-        weight_dict = pickle.load(fi)
-        init_op, init_feed = tf.contrib.framework.assign_from_values(weight_dict)
-        sess.run(init_op, init_feed)
-
-    with open('./weights/weights_Pose3D.pickle', 'rb') as fi:
-        weight_dict = pickle.load(fi)
-        init_op, init_feed = tf.contrib.framework.assign_from_values(weight_dict)
-        sess.run(init_op, init_feed)
+    # initialize network
+    net.init(sess)
 
     # Feed image list through network
     for img_name in image_list:

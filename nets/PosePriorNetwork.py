@@ -18,132 +18,83 @@
 from __future__ import print_function, unicode_literals
 
 import tensorflow as tf
-from utils import *
+import os
+
+from utils.general import *
+from utils.canonical_trafo import *
+from utils.relative_trafo import *
 
 ops = NetworkOps
 
 
-class ColorHandPose3DNetwork(object):
-    """ Network performing 3D pose estimation of a human hand from single color image. """
-    def __init__(self):
-        self.crop_size = 256
+class PosePriorNetwork(object):
+    """ Network containing different variants for lifting 2D predictions into 3D. """
+    def __init__(self, variant):
         self.num_kp = 21
+        self.variant = variant
 
-    def inference(self, image, hand_side, evaluation):
-        # use network for hand segmentation for detection
-        hand_scoremap = self._inference_detection(image)
+    def init(self, session, weight_files=None, exclude_var_list=None):
+        """ Initializes weights from pickled python dictionaries.
 
-        # Intermediate data processing
-        hand_mask = single_obj_scoremap(hand_scoremap)
-        center, _, crop_size_best = calc_center_bb(hand_mask)
-        crop_size_best *= 1.25
-        scale_crop = tf.minimum(tf.maximum(self.crop_size / crop_size_best, 0.25), 5.0)
-        image_crop = crop_image_from_xy(image, center, self.crop_size, scale=scale_crop)
+            Inputs:
+                session: tf.Session, Tensorflow session object containing the network graph
+                weight_files: list of str, Paths to the pickle files that are used to initialize network weights
+                exclude_var_list: list of str, Weights that should not be loaded
+        """
+        if exclude_var_list is None:
+            exclude_var_list = list()
 
-        # detect keypoints in 2D
-        keypoints_scoremap = self._inference_pose2d(image_crop)
+        import pickle
+        # Initialize with weights
+        for file_name in weight_files:
+            assert os.path.exists(file_name), "File not found."
+            with open(file_name, 'rb') as fi:
+                weight_dict = pickle.load(fi)
+                weight_dict = {k: v for k, v in weight_dict.items() if not any([x in k for x in exclude_var_list])}
+                if len(weight_dict) > 0:
+                    init_op, init_feed = tf.contrib.framework.assign_from_values(weight_dict)
+                    session.run(init_op, init_feed)
+                    print('Loaded %d variables from %s' % (len(weight_dict), file_name))
 
-        # estimate most likely 3D pose
-        keypoint_coord3d = self._inference_pose3d(keypoints_scoremap, hand_side, evaluation)
+    def inference(self, scoremap, hand_side, evaluation):
+        """ Infere 3D coordinates from 2D scoremaps. """
+        scoremap_pooled = tf.nn.avg_pool(scoremap, ksize=[1, 8, 8, 1], strides=[1, 8, 8, 1], padding='SAME')
 
-        # upsample keypoint scoremap
-        s = image_crop.get_shape().as_list()
-        keypoints_scoremap = tf.image.resize_images(keypoints_scoremap, (s[1], s[2]))
+        coord3d, R = None, None
+        if self.variant == 'direct':
+            coord_xyz_rel_normed = self._inference_pose3d(scoremap_pooled, hand_side, evaluation, train=True)
+            coord3d = coord_xyz_rel_normed
+        elif self.variant == 'bottleneck':
+            coord_xyz_rel_normed = self._inference_pose3d(scoremap_pooled, hand_side, evaluation, train=True, bottleneck=True)
+            coord3d = coord_xyz_rel_normed
+        elif (self.variant == 'local') or (self.variant == 'local_w_xyz_loss'):
+            coord_xyz_rel_loc = self._inference_pose3d(scoremap_pooled, hand_side, evaluation, train=True)
+            coord3d = coord_xyz_rel_loc
 
-        return hand_scoremap, image_crop, scale_crop, center, keypoints_scoremap, keypoint_coord3d
+            # assemble to real coords
+            coord_xyz_rel_normed = bone_rel_trafo_inv(coord_xyz_rel_loc)
+        elif self.variant == 'proposed':
+            # infer coordinates in the canonical frame
+            coord_can = self._inference_pose3d(scoremap_pooled, hand_side, evaluation, train=True)
+            coord3d = coord_can
 
-    @staticmethod
-    def _inference_detection(image, train=False):
-        """ Detects the hand in the input image by segmenting it. """
-        with tf.variable_scope('HandSegNet'):
-            scoremap_list = list()
-            layers_per_block = [2, 2, 4, 4]
-            out_chan_list = [64, 128, 256, 512]
-            pool_list = [True, True, True, False]
+            # infer viewpoint
+            rot_mat = self._inference_viewpoint(scoremap_pooled, hand_side, evaluation, train=True)
+            R = rot_mat
 
-            # learn some feature representation, that describes the image content well
-            x = image
-            for block_id, (layer_num, chan_num, pool) in enumerate(zip(layers_per_block, out_chan_list, pool_list), 1):
-                for layer_id in range(layer_num):
-                    x = ops.conv_relu(x, 'conv%d_%d' % (block_id, layer_id+1), kernel_size=3, stride=1, out_chan=chan_num, trainable=train)
-                if pool:
-                    x = ops.max_pool(x, 'pool%d' % block_id)
+            # flip hand according to hand side
+            cond_right = tf.equal(tf.argmax(hand_side, 1), 1)
+            cond_right_all = tf.tile(tf.reshape(cond_right, [-1, 1, 1]), [1, self.num_kp, 3])
+            coord_xyz_can_flip = self._flip_right_hand(coord_can, cond_right_all)
 
-            x = ops.conv_relu(x, 'conv5_1', kernel_size=3, stride=1, out_chan=512, trainable=train)
-            encoding = ops.conv_relu(x, 'conv5_2', kernel_size=3, stride=1, out_chan=128, trainable=train)
+            # rotate view back
+            coord_xyz_rel_normed = tf.matmul(coord_xyz_can_flip, rot_mat)
+        else:
+            assert 0, "Unknown variant."
 
-            # use encoding to detect initial scoremap
-            x = ops.conv_relu(encoding, 'conv6_1', kernel_size=1, stride=1, out_chan=512, trainable=train)
-            scoremap = ops.conv(x, 'conv6_2', kernel_size=1, stride=1, out_chan=2, trainable=train)
-            scoremap_list.append(scoremap)
+        return coord_xyz_rel_normed, coord3d, R
 
-            # upsample to full size
-            s = image.get_shape().as_list()
-            scoremap_list_large = [tf.image.resize_images(x, (s[1], s[2])) for x in scoremap_list]
-
-        return scoremap_list_large[-1]
-
-    def _inference_pose2d(self, image_crop, train=False):
-        """ Given an image it detects the 2D hand keypoints. """
-        with tf.variable_scope('PoseNet2D'):
-            scoremap_list = list()
-            layers_per_block = [2, 2, 4, 2]
-            out_chan_list = [64, 128, 256, 512]
-            pool_list = [True, True, True, False]
-
-            # learn some feature representation, that describes the image content well
-            x = image_crop
-            for block_id, (layer_num, chan_num, pool) in enumerate(zip(layers_per_block, out_chan_list, pool_list), 1):
-                for layer_id in range(layer_num):
-                    x = ops.conv_relu(x, 'conv%d_%d' % (block_id, layer_id+1), kernel_size=3, stride=1, out_chan=chan_num, trainable=train)
-                if pool:
-                    x = ops.max_pool(x, 'pool%d' % block_id)
-
-            x = ops.conv_relu(x, 'conv4_3', kernel_size=3, stride=1, out_chan=256, trainable=train)
-            x = ops.conv_relu(x, 'conv4_4', kernel_size=3, stride=1, out_chan=256, trainable=train)
-            x = ops.conv_relu(x, 'conv4_5', kernel_size=3, stride=1, out_chan=256, trainable=train)
-            x = ops.conv_relu(x, 'conv4_6', kernel_size=3, stride=1, out_chan=256, trainable=train)
-            encoding = ops.conv_relu(x, 'conv4_7', kernel_size=3, stride=1, out_chan=128, trainable=train)
-
-            # use encoding to detect initial scoremap
-            x = ops.conv_relu(encoding, 'conv5_1', kernel_size=1, stride=1, out_chan=512, trainable=train)
-            scoremap = ops.conv(x, 'conv5_2', kernel_size=1, stride=1, out_chan=self.num_kp, trainable=train)
-            scoremap_list.append(scoremap)
-
-            # iterate recurrent part a couple of times
-            layers_per_recurrent_unit = 5
-            num_recurrent_units = 2
-            for pass_id in range(num_recurrent_units):
-                x = tf.concat([scoremap_list[-1], encoding], 3)
-                for rec_id in range(layers_per_recurrent_unit):
-                    x = ops.conv_relu(x, 'conv%d_%d' % (pass_id+6, rec_id+1), kernel_size=7, stride=1, out_chan=128, trainable=train)
-                x = ops.conv_relu(x, 'conv%d_6' % (pass_id+6), kernel_size=1, stride=1, out_chan=128, trainable=train)
-                scoremap = ops.conv(x, 'conv%d_7' % (pass_id+6), kernel_size=1, stride=1, out_chan=self.num_kp, trainable=train)
-                scoremap_list.append(scoremap)
-
-            scoremap_list_large = scoremap_list
-
-        return scoremap_list_large[-1]
-
-    def _inference_pose3d(self, keypoints_scoremap, hand_side, evaluation, train=False):
-        """ Estimates the most likely normalized 3D pose given the 2D detections and the hand side. """
-        # infer coordinates in the canonical frame
-        coord_can = self._inference_pose3d_can(keypoints_scoremap, hand_side, evaluation)
-
-        # infer viewpoint
-        rot_mat = self._inference_viewpoint(keypoints_scoremap, hand_side, evaluation)
-
-        # flip hand according to hand side
-        cond_right = tf.equal(tf.argmax(hand_side, 1), 1)
-        cond_right_all = tf.tile(tf.reshape(cond_right, [-1, 1, 1]), [1, self.num_kp, 3])
-        coord_xyz_can_flip = self._flip_right_hand(coord_can, cond_right_all)
-
-        # rotate view back
-        coord_xyz_rel_normed = tf.matmul(coord_xyz_can_flip, rot_mat)
-
-        return coord_xyz_rel_normed
-
-    def _inference_pose3d_can(self, keypoints_scoremap, hand_side, evaluation, train=False):
+    def _inference_pose3d(self, keypoints_scoremap, hand_side, evaluation, train=False, bottleneck=False):
         """ Inference of canonical coordinates. """
         with tf.variable_scope('PosePrior'):
             # use encoding to detect relative, normed 3d coords
@@ -161,6 +112,8 @@ class ColorHandPose3DNetwork(object):
             for i, out_chan in enumerate(out_chan_list):
                 x = ops.fully_connected_relu(x, 'fc_rel%d' % i, out_chan=out_chan, trainable=train)
                 x = ops.dropout(x, 0.8, evaluation)
+            if bottleneck:
+                x = ops.fully_connected(x, 'fc_bottleneck', out_chan=30)
             coord_xyz_rel = ops.fully_connected(x, 'fc_xyz', out_chan=self.num_kp*3, trainable=train)
 
             # reshape stuff
@@ -168,11 +121,11 @@ class ColorHandPose3DNetwork(object):
 
             return coord_xyz_rel
 
-    def _inference_viewpoint(self, keypoints_scoremap, hand_side, evaluation):
+    def _inference_viewpoint(self, keypoints_scoremap, hand_side, evaluation, train=False):
         """ Inference of the viewpoint. """
         with tf.variable_scope('ViewpointNet'):
             # estimate rotation
-            ux, uy, uz = self._rotation_estimation(keypoints_scoremap, hand_side, evaluation)
+            ux, uy, uz = self._rotation_estimation(keypoints_scoremap, hand_side, evaluation, train=train)
 
             # assemble rotation matrix
             rot_mat = self._get_rot_mat(ux, uy, uz)

@@ -68,9 +68,9 @@ You should be able to obtain results that roughly match the following numbers we
 eval2d_gt_cropped.py yields:
 
     Evaluation results:
-    Average mean error: 7.630 pixels
-    Average median error: 3.939 pixels
-    Area under curve: 0.771 pixels
+    Average mean EPE: 7.630 pixels
+    Average median EPE: 3.939 pixels
+    Area under curve: 0.771
 
 
 eval2d.py yields:
@@ -78,7 +78,7 @@ eval2d.py yields:
     Evaluation results:
     Average mean EPE: 15.469 pixels
     Average median EPE: 4.374 pixels
-    Area under curve: 0.715 pixels
+    Area under curve: 0.715
 
 Because training itself isn't a deterministic process results will differ between runs.
 Note that these results are not listed in the paper.

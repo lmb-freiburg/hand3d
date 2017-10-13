@@ -91,6 +91,8 @@ def write_to_binary(file_handle, image, mask, kp_coord_xyz, kp_coord_uv, kp_visi
 # binary file we will write
 file_name_out = './data/bin/rhd_%s.bin' % set
 
+if not os.path.exists('./data/bin'):
+    os.mkdir('./data/bin')
 
 # load annotations of this set
 with open(os.path.join(path_to_db, set, 'anno_%s.pickle' % set), 'rb') as fi:

@@ -16,6 +16,7 @@
 #  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 from __future__ import print_function, unicode_literals
+import os
 
 import tensorflow as tf
 
@@ -60,6 +61,8 @@ class BinaryDbReaderSTB(object):
             self.num_samples = 6000
         else:
             assert 0, "Unknown dataset mode."
+
+        assert os.path.exists(self.path_to_db), "Could not find the binary data file!"
 
         # general parameters
         self.batch_size = batch_size

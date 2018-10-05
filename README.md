@@ -26,6 +26,7 @@ Python packages used by the example provided and their recommended version:
 - numpy==1.13.0
 - scipy==0.18.1
 - matplotlib==1.5.3
+- Pillow==5.3.0
 
 ## Preprocessing for training and evaluation
 In order to use the training and evaluation scripts you need download and preprocess the datasets.
